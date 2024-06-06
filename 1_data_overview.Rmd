@@ -1,0 +1,52 @@
+# Data overview
+
+```{r load_data, warning=FALSE, comments="", message=FALSE}
+#Load counts
+counts <- read_tsv("data/gene_counts.tsv") %>%
+  column_to_rownames(var="gene_id")
+metadata <- read_tsv("data/sample_metadata.tsv")
+```
+
+```{r dge, warning=FALSE, comments="", message=FALSE}
+#Create study design matrix
+group <- metadata$treatment
+design <- model.matrix(~0+group)
+
+#Create DGE object, calculate normalisation factors and estimate dispersion parameters
+dgeObj <- DGEList(counts, group=group, lib.size=colSums(counts)) %>%
+    calcNormFactors() %>%
+    estimateGLMCommonDisp(., design) %>%
+    estimateGLMTrendedDisp(., design) %>%
+    estimateGLMTagwiseDisp(., design)
+```
+
+```{r mds, warning=FALSE, comments="", message=FALSE}
+plotMDS(dgeObj, 
+        method="bcv", 
+        col=as.numeric(dgeObj$samples$group ))
+
+legend("topleft",
+       as.character(unique(dgeObj$samples$group)), 
+       col=1:2, 
+       pch=20)
+```
+
+## Compare treatments
+
+First fit the data to the count model before making contrasts of interest. Then use glmLRT() with makeContrasts() to test differential expression between desired groups.
+
+```{r glm, warning=FALSE, comments="", message=FALSE}
+# Fit the linear model
+fit <- glmFit(dgeObj, design)
+
+# Compare treatments
+treatdiff <- glmLRT(fit, contrast=makeContrasts(groupC-groupT, levels=design))
+
+#Top differentiated genes
+genes_top <- rownames(topTags(treatdiff, n = 30))
+
+#Significant genes
+dt_significant <- decideTestsDGE(treatdiff, adjust.method="BH", p.value=0.05)
+genes_sign <- rownames(dgeObj)[as.logical(dt_significant)]
+
+```
