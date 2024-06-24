@@ -1,52 +1,187 @@
 # Data overview
+```{r load, warning=FALSE, comments="", message=FALSE}
+#Load only data from the last experiment
+counts <- read_tsv("data/gene_counts.tsv") %>% 
+  column_to_rownames(.,"gene_id" )
 
-```{r load_data, warning=FALSE, comments="", message=FALSE}
-#Load counts
-counts <- read_tsv("data/gene_counts.tsv") %>%
-  column_to_rownames(var="gene_id")
 metadata <- read_tsv("data/sample_metadata.tsv")
+
 ```
 
-```{r dge, warning=FALSE, comments="", message=FALSE}
+# Deseq2
+
+```{r nozero_phylo, comment="", message=FALSE, warning=FALSE}
+#phyloseq object without structural zeros
+phylo_samples <- metadata %>% 
+                    column_to_rownames("sample") %>% 
+                    sample_data() #convert to phyloseq sample_data object
+
+phylo_counts <- counts %>%
+                    otu_table(., taxa_are_rows = TRUE) #convert to phyloseq otu_table object
+
+physeq <- phyloseq(phylo_counts, phylo_samples)
+```
+
+## CON vs EFC
+
+```{r deseq2_CsE, comment="", echo=FALSE, message=FALSE, warning=FALSE}
+physeq_CsE <- subset_samples(physeq, treatment == c("CON", "EFC"))
+physeq_CsE <- prune_taxa(taxa_sums(physeq_CsE)>0, physeq_CsE)
+
+
+diagdds = phyloseq_to_deseq2(physeq_CsE, ~ treatment)
+diagdds <- estimateSizeFactors(diagdds, type="poscounts",locfunc=genefilter::shorth)
+diagdds = DESeq(diagdds, test="Wald", fitType="parametric")
+diagdds_CsE <- results(diagdds, alpha=0.01, contrast=c("treatment", "CON", "EFC"))
+sigtab_diagdds_CsE_adj <- diagdds_CsE[which(diagdds_CsE$padj < 0.05), ] %>% as.data.frame()
+sigtab_diagdds_CsE <- diagdds_CsE[which(diagdds_CsE$pvalue < 0.05), ] %>% as.data.frame()
+
+sigtab_diagdds_CsE
+#write.table(sigtab_diagdds_CsE, "significat_genes.tsv")
+```
+
+## CON vs PAC
+
+```{r deseq2_CA, comment="", echo=FALSE, message=FALSE, warning=FALSE}
+physeq_CA <- subset_samples(physeq, treatment == c("CON", "PAC"))
+physeq_CA <- prune_taxa(taxa_sums(physeq_CA)>0, physeq_CA)
+
+diagdds = phyloseq_to_deseq2(physeq_CA, ~ treatment)
+diagdds <- estimateSizeFactors(diagdds, type="poscounts",locfunc=genefilter::shorth)
+diagdds = DESeq(diagdds, test="Wald", fitType="parametric")
+diagdds_CA <- results(diagdds, alpha=0.01, contrast=c("treatment", "CON", "PAC"))
+sigtab_diagdds_CA <- diagdds_CA[which(diagdds_CA$padj < 0.05), ] %>% as.data.frame()
+#sigtab_diagdds_CA <- diagdds_CA[which(diagdds_CA$pvalue < 0.05), ] %>% as.data.frame()
+
+sigtab_diagdds_CA
+```
+
+### Heatmap 
+```{r filter_Sig_CA, warning=FALSE, comments="", message=FALSE}
 #Create study design matrix
-group <- metadata$treatment
-design <- model.matrix(~0+group)
+meta_CA <- metadata %>% 
+  filter(treatment %in% c("CON","PAC"))
 
-#Create DGE object, calculate normalisation factors and estimate dispersion parameters
-dgeObj <- DGEList(counts, group=group, lib.size=colSums(counts)) %>%
-    calcNormFactors() %>%
-    estimateGLMCommonDisp(., design) %>%
-    estimateGLMTrendedDisp(., design) %>%
-    estimateGLMTagwiseDisp(., design)
+group_CA <- meta_CA$treatment
+design_CA <- model.matrix(~0+group_CA)
+
+count_CA <- counts[,colnames(counts) %in% meta_CA$sample]
+signif_genes_CA <- rownames(sigtab_diagdds_CA)
+countsdeseq_sign_CA <- count_CA[signif_genes_CA, ] %>% 
+  as.matrix()
 ```
 
-```{r mds, warning=FALSE, comments="", message=FALSE}
-plotMDS(dgeObj, 
-        method="bcv", 
-        col=as.numeric(dgeObj$samples$group ))
-
-legend("topleft",
-       as.character(unique(dgeObj$samples$group)), 
-       col=1:2, 
-       pch=20)
-```
-
-## Compare treatments
-
-First fit the data to the count model before making contrasts of interest. Then use glmLRT() with makeContrasts() to test differential expression between desired groups.
-
-```{r glm, warning=FALSE, comments="", message=FALSE}
-# Fit the linear model
-fit <- glmFit(dgeObj, design)
-
-# Compare treatments
-treatdiff <- glmLRT(fit, contrast=makeContrasts(groupC-groupT, levels=design))
-
-#Top differentiated genes
-genes_top <- rownames(topTags(treatdiff, n = 30))
-
-#Significant genes
-dt_significant <- decideTestsDGE(treatdiff, adjust.method="BH", p.value=0.05)
-genes_sign <- rownames(dgeObj)[as.logical(dt_significant)]
+```{r deseq_plot_CA, comment="", message=FALSE, warning=FALSE}
+#pdf("CON_PAC.pdf",width=10, height=8)
+heatmap.2(log2(countsdeseq_sign_CA + 1),ColSideColors=c(rep("black",3),rep("red",3)),
+          key=TRUE,
+           margins = c(9, 9),
+          trace="none", 
+          col=heat.colors(200), 
+          scale="row",
+          cexRow=2,
+          cexCol = 2)
+#dev.off()
 
 ```
+
+### Plot (PAC vs. CON)
+```{r deseq_plot2_CA, comment="", message=FALSE, fig.height=8, fig.width=10, fig.fullwidth=TRUE}
+sigtab_diagdds_CA %>%
+mutate(Color = ifelse(log2FoldChange <0, "Treatment","Control"))%>% 
+  rownames_to_column(., "genes")%>% 
+#  ggplot(aes(x=genes, y=log2FoldChange)) + 
+  ggplot(aes(x=forcats::fct_reorder(genes,log2FoldChange), y=log2FoldChange, fill=Color)) + 
+  geom_col()  + 
+  scale_fill_manual(breaks=c("Control","Treatment"),labels=c("Control","Cell structures"), values=c("#e5bd5b", "#6b7398")) + 
+  geom_hline(yintercept=0) + 
+  coord_flip()+
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 12),
+        legend.position = "right", 
+        legend.title = element_blank(),
+        panel.background = element_blank(),
+          panel.grid.major = element_line(size = 0.15, linetype = 'solid',
+                                colour = "grey"))+
+  xlab("Genes") + 
+  ylab("log2FoldChange")
+```
+
+## CON vs PAM
+```{r deseq2_CPAM, comment="", echo=FALSE, message=FALSE, warning=FALSE}
+physeq_CPAM <- subset_samples(physeq, treatment == c("CON", "PAM"))
+physeq_CPAM <- prune_taxa(taxa_sums(physeq_CPAM)>0, physeq_CPAM)
+
+diagdds = phyloseq_to_deseq2(physeq_CPAM, ~ treatment)
+diagdds <- estimateSizeFactors(diagdds, type="poscounts",locfunc=genefilter::shorth)
+diagdds = DESeq(diagdds, test="Wald", fitType="parametric")
+diagdds_CPAM <- results(diagdds, alpha=0.01, contrast=c("treatment", "CON", "PAM"))
+sigtab_diagdds_CPAM <- diagdds_CPAM[which(diagdds_CPAM$padj < 0.05), ] %>% as.data.frame()
+sigtab_diagdds_CPAM
+```
+
+### Heatmap 
+```{r filter_Sig_CPAM, warning=FALSE, comments="", message=FALSE}
+#Create study design matrix
+meta_CPAM <- metadata %>% 
+  filter(treatment %in% c("CON","PAM"))
+
+group_CPAM <- meta_CPAM$treatment
+design_CPAM <- model.matrix(~0+group_CPAM)
+
+count_CPAM <- counts[,colnames(counts) %in% meta_CPAM$sample]
+signif_genes_CPAM <- rownames(sigtab_diagdds_CPAM)
+countsdeseq_sign_CPAM <- count_CPAM[signif_genes_CPAM, ] %>% 
+  as.matrix()
+```
+
+```{r deseq_plot1_CPAM, comment="", message=FALSE, warning=FALSE, fig.height=8, fig.fullwidth=TRUE}
+#pdf("CON_PAM.pdf",width=10, height=8)
+heatmap.2(log2(countsdeseq_sign_CPAM + 1),ColSideColors=c(rep("black",3),rep("red",3)),
+          key=TRUE,
+          margins = c(7, 7),
+          trace="none", 
+          col=heat.colors(200), 
+          scale="row",
+          cexRow=1.5,
+          cexCol = 1.5)
+#dev.off()
+```
+
+### Plot (PAM vs. CON)
+```{r deseq_plot2_CPAM, comment="", message=FALSE, fig.height=8, fig.width=10, fig.fullwidth=TRUE}
+sigtab_diagdds_CPAM %>%
+mutate(Color = ifelse(log2FoldChange <0, "Treatment","Control"))%>% 
+  rownames_to_column(., "genes")%>% 
+#  ggplot(aes(x=genes, y=log2FoldChange)) + 
+  ggplot(aes(x=forcats::fct_reorder(genes,log2FoldChange), y=log2FoldChange, fill=Color)) + 
+  geom_col()  + 
+  scale_fill_manual(breaks=c("Control","Treatment"),labels=c("Control","Metabolites"), values=c("#e5bd5b", "#6b7398")) + 
+  geom_hline(yintercept=0) + 
+  coord_flip()+
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 12),
+        legend.position = "right", 
+        legend.title = element_blank(),
+        panel.background = element_blank(),
+          panel.grid.major = element_line(size = 0.15, linetype = 'solid',
+                                colour = "grey"))+
+  xlab("Genes") + 
+  ylab("log2FoldChange")
+```
+
+## PAM vs PAC
+
+```{r deseq2_PP, comment="", echo=FALSE, message=FALSE, warning=FALSE}
+physeq_PP <- subset_samples(physeq, treatment == c("PAC", "PAM"))
+physeq_PP <- prune_taxa(taxa_sums(physeq_PP)>0, physeq_PP)
+
+diagdds = phyloseq_to_deseq2(physeq_PP, ~ treatment)
+diagdds <- estimateSizeFactors(diagdds, type="poscounts",locfunc=genefilter::shorth)
+diagdds = DESeq(diagdds, test="Wald", fitType="parametric")
+diagdds_PP <- results(diagdds, alpha=0.01, contrast=c("treatment", "PAC", "PAM"))
+sigtab_diagdds_PP <- diagdds_PP[which(diagdds_PP$padj < 0.05), ] %>% as.data.frame()
+sigtab_diagdds_PP
+```
+
+
